@@ -1,0 +1,10 @@
+.venv/
+.env
+.certs/
+logs/
+node_modules/
+__pycache__/
+*.pyc
+.python-version
+uv.lock
+package-lock.json
