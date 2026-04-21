@@ -1,0 +1,9 @@
+.venv/
+.env
+.git/
+.certs/
+logs/
+data/
+node_modules/
+__pycache__/
+*.pyc

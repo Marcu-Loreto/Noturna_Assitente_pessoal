@@ -1,0 +1,14 @@
+services:
+  noturna:
+    build: .
+    container_name: noturna
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+      - "8000:8000" # Google OAuth callback
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./prompts:/app/prompts
+      - ./.certs:/app/.certs

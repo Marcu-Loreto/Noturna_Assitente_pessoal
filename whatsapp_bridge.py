@@ -139,3 +139,92 @@ class WhatsAppBridge:
         except Exception as e:
             logger.error("WhatsApp get_messages failed: %s", e)
             return {"error": str(e)}
+
+    async def download_audio(self, message: dict) -> bytes | None:
+        """Download audio from a WhatsApp audio message via Evolution API."""
+        try:
+            msg_content = message.get("message", {})
+            # Audio can be in audioMessage or pttMessage (push-to-talk)
+            audio_msg = msg_content.get("audioMessage") or msg_content.get("pttMessage")
+            if not audio_msg:
+                return None
+
+            media_url = audio_msg.get("url")
+            if not media_url:
+                # Try to get media via Evolution API
+                msg_id = message.get("key", {}).get("id", "")
+                resp = http_requests.post(
+                    _url(f"chat/getBase64FromMediaMessage/{EVOLUTION_INSTANCE}"),
+                    headers=_headers(),
+                    json={"message": message, "convertToMp4": False},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                import base64
+                return base64.b64decode(data.get("base64", ""))
+
+            # Direct download
+            resp = http_requests.get(media_url, timeout=30)
+            resp.raise_for_status()
+            return resp.content
+        except Exception as e:
+            logger.error("Audio download failed: %s", e)
+            return None
+
+    def register_webhook(self, webhook_url: str) -> dict:
+        """Register webhook on Evolution API to receive messages."""
+        try:
+            resp = http_requests.post(
+                _url(f"webhook/set/{EVOLUTION_INSTANCE}"),
+                headers=_headers(),
+                json={
+                    "webhook": {
+                        "enabled": True,
+                        "url": webhook_url,
+                        "webhookByEvents": False,
+                        "webhookBase64": True,
+                        "events": [
+                            "MESSAGES_UPSERT",
+                        ],
+                    },
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            logger.info("Webhook registered: %s", webhook_url)
+            return {"success": True}
+        except Exception as e:
+            logger.error("Webhook registration failed: %s", e)
+            return {"error": str(e)}
+
+
+class GroqSTT:
+    """Speech-to-text using Groq's Whisper API."""
+
+    def __init__(self):
+        self.api_key = os.environ.get("GROQ_API_KEY", "")
+        self.enabled = bool(self.api_key)
+        if self.enabled:
+            logger.info("Groq STT enabled")
+
+    async def transcribe(self, audio_bytes: bytes, filename: str = "audio.ogg") -> str:
+        """Transcribe audio bytes to text using Groq Whisper."""
+        if not self.enabled:
+            return ""
+
+        try:
+            resp = http_requests.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                files={"file": (filename, audio_bytes, "audio/ogg")},
+                data={"model": "whisper-large-v3", "language": "pt"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            text = resp.json().get("text", "")
+            logger.info("STT transcribed: %s", text[:100])
+            return text
+        except Exception as e:
+            logger.error("Groq STT failed: %s", e)
+            return ""

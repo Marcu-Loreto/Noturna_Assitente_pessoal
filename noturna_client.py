@@ -27,7 +27,7 @@ import uvicorn
 
 from mcp_bridge import MCPBridge
 from noturna_agent import NoturnaLocalAgent
-from whatsapp_bridge import WhatsAppBridge
+from whatsapp_bridge import WhatsAppBridge, GroqSTT
 
 load_dotenv(override=True)
 
@@ -57,6 +57,7 @@ KEY_FILE = CERT_DIR / "key.pem"
 
 mcp = MCPBridge()
 whatsapp = WhatsAppBridge()
+stt = GroqSTT()
 agent = NoturnaLocalAgent()
 
 
@@ -91,6 +92,15 @@ async def lifespan(app: FastAPI):
     agent.weather_fn = _weather_tool
     agent.whatsapp = whatsapp
     logger.info("MCP Bridge started. Tools: %d", len(mcp.list_tools()))
+
+    # Register WhatsApp webhook
+    if whatsapp.enabled:
+        webhook_url = os.environ.get("WEBHOOK_URL", "")
+        if webhook_url:
+            whatsapp.register_webhook(f"{webhook_url}/api/whatsapp/webhook")
+        else:
+            logger.warning("WEBHOOK_URL not set — WhatsApp webhook not registered. Set it to your public URL.")
+
     yield
     logger.info("Shutting down...")
     await mcp.stop()
@@ -287,6 +297,69 @@ async def save_voice_message(request: Request):
         logger.info("Voice msg saved [%s]: %s — %s", session_id, role, content[:80])
 
     return JSONResponse(content={"ok": True})
+
+
+@app.post("/api/whatsapp/webhook")
+async def whatsapp_webhook(request: Request):
+    """Receive WhatsApp messages from Evolution API and respond via agent."""
+    try:
+        body = await request.json()
+        event = body.get("event", "")
+
+        if event != "messages.upsert":
+            return JSONResponse(content={"ok": True})
+
+        data = body.get("data", {})
+        key = data.get("key", {})
+        from_me = key.get("fromMe", False)
+        remote_jid = key.get("remoteJid", "")
+
+        # Ignore messages sent by us and group messages
+        if from_me or "@g.us" in remote_jid:
+            return JSONResponse(content={"ok": True})
+
+        # Extract sender number for session
+        sender = remote_jid.replace("@s.whatsapp.net", "")
+        session_id = f"whatsapp:{sender}"
+        msg_content = data.get("message", {})
+
+        # Check for text message
+        text = (
+            msg_content.get("conversation", "")
+            or msg_content.get("extendedTextMessage", {}).get("text", "")
+        )
+
+        # Check for audio message — transcribe with Groq STT
+        if not text and (msg_content.get("audioMessage") or msg_content.get("pttMessage")):
+            logger.info("WhatsApp audio from %s — transcribing...", sender)
+            audio_bytes = await whatsapp.download_audio(data)
+            if audio_bytes and stt.enabled:
+                text = await stt.transcribe(audio_bytes)
+                if text:
+                    logger.info("Transcribed [%s]: %s", sender, text[:100])
+                else:
+                    await whatsapp.send_message(sender, "Desculpe, não consegui entender o áudio.")
+                    return JSONResponse(content={"ok": True})
+            else:
+                await whatsapp.send_message(sender, "Desculpe, não consigo processar áudios no momento.")
+                return JSONResponse(content={"ok": True})
+
+        if not text:
+            return JSONResponse(content={"ok": True})
+
+        logger.info("WhatsApp msg from %s: %s", sender, text[:100])
+
+        # Process with agent
+        reply = await agent.chat(text, session_id)
+        logger.info("WhatsApp reply to %s: %s", sender, reply[:100])
+
+        # Send reply back via WhatsApp
+        await whatsapp.send_message(sender, reply)
+
+        return JSONResponse(content={"ok": True})
+    except Exception as e:
+        logger.error("WhatsApp webhook error: %s", e)
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
 HTML_PAGE = """<!DOCTYPE html>
